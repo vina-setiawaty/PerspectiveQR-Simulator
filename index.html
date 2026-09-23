@@ -100,15 +100,19 @@
         <button type="button" id="topViewBtn" class="viewport-btn">View from top ⤒</button>
         <canvas id="perspCanvas"></canvas>
       </div>
+      <!-- Top-down reveal pane -- not needed right now, commented out rather
+           than removed. app.js already guards every use of #topCanvas, so
+           uncommenting this is all it takes to bring it back.
       <div class="viewport">
         <h2>Top-down view (the reveal)</h2>
         <canvas id="topCanvas"></canvas>
       </div>
+      -->
     </main>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/TrackballControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="app.js"></script>

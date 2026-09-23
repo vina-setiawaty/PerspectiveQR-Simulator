@@ -63,6 +63,11 @@
       back:  { p00: v.D, p10: v.C, p11: v.F, p01: v.E },
       left:  { p00: v.A, p10: v.D, p11: v.E, p01: v.E },
       right: { p00: v.B, p10: v.C, p11: v.F, p01: v.F },
+      // Closes the bottom so the solid isn't hollow -- without it, orbiting
+      // underneath looks straight into the interior and the backside of
+      // the sloped faces' textures. Flat (all 4 corners at y=0), so it
+      // needs no subdivision the way the sloped faces do.
+      base:  { p00: v.A, p10: v.B, p11: v.C, p01: v.D },
     };
   }
 
@@ -211,13 +216,17 @@
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0xe9e9e4);
 
-    ['front', 'back', 'left', 'right'].forEach((name) => {
+    ['front', 'back', 'left', 'right', 'base'].forEach((name) => {
       const geo = new THREE.BufferGeometry();
       const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
       const mesh = new THREE.Mesh(geo, mat);
       scene.add(mesh);
       meshes[name] = mesh;
     });
+    // Nudged a hair below y=0 so it isn't exactly coplanar with the sloped
+    // faces' bottom edges -- otherwise the shared seam z-fights (flickering
+    // moire) at grazing viewing angles. Imperceptible at real scene scale.
+    meshes.base.position.y = -0.02;
 
     // No ground plane / grid -- the prism sits in open space so orbiting
     // all the way to directly overhead (or any other angle) is never
@@ -226,23 +235,39 @@
     perspRenderer = new THREE.WebGLRenderer({ canvas: perspCanvas, antialias: true });
     perspRenderer.outputEncoding = THREE.sRGBEncoding;
     perspCamera = new THREE.PerspectiveCamera(DEFAULT_FOV, 1, 1, 5000);
-    orbitControls = new THREE.OrbitControls(perspCamera, perspCanvas);
-    orbitControls.enableDamping = true;
-    orbitControls.dampingFactor = 0.08;
+    // TrackballControls (arcball), not OrbitControls: OrbitControls
+    // decomposes rotation into polar/azimuthal angles, and polar angle is
+    // mathematically capped at [0, PI] no matter how it's configured --
+    // dragging straight through the pole hits a hard stop there with
+    // nowhere further to go. TrackballControls rotates the camera (and its
+    // up vector) freely via arcball quaternions, so there's no pole and no
+    // stopping point in any direction.
+    orbitControls = new THREE.TrackballControls(perspCamera, perspCanvas);
+    // staticMoving=true (no inertia/coasting): TrackballControls keeps
+    // applying decaying leftover spin on every update() call after a drag
+    // ends, with no public way to clear it -- which would otherwise nudge
+    // the camera off-target the instant "View from Top" repositions it
+    // right after the user was dragging. Dragging stops immediately on
+    // mouse-up instead, trading coast-to-a-stop polish for the recenter
+    // button always landing exactly where it should.
+    orbitControls.staticMoving = true;
     orbitControls.minDistance = 10;
     orbitControls.maxDistance = 2000;
-    orbitControls.minPolarAngle = 0;       // straight down from directly above...
-    orbitControls.maxPolarAngle = Math.PI; // ...through straight up from directly below
 
+    // The top-down reveal pane is currently commented out of index.html
+    // (not needed right now) -- everything below guards on its presence, so
+    // uncommenting that <div> is the only thing needed to bring it back.
     const topCanvas = document.getElementById('topCanvas');
-    topRenderer = new THREE.WebGLRenderer({ canvas: topCanvas, antialias: true });
-    topRenderer.outputEncoding = THREE.sRGBEncoding;
-    // Also a real PerspectiveCamera: the "reveal" is now defined as the view
-    // from a camera state.viewDist above the ridge top (see
-    // revealCameraHeight), not an idealized orthographic one, so this pane
-    // has to use the same finite-distance camera to match what was
-    // actually baked into the textures.
-    topCamera = new THREE.PerspectiveCamera(TOP_VIEW_FOV, 1, 1, 5000);
+    if (topCanvas) {
+      topRenderer = new THREE.WebGLRenderer({ canvas: topCanvas, antialias: true });
+      topRenderer.outputEncoding = THREE.sRGBEncoding;
+      // Also a real PerspectiveCamera: the "reveal" is now defined as the
+      // view from a camera state.viewDist above the ridge top (see
+      // revealCameraHeight), not an idealized orthographic one, so this
+      // pane has to use the same finite-distance camera to match what was
+      // actually baked into the textures.
+      topCamera = new THREE.PerspectiveCamera(TOP_VIEW_FOV, 1, 1, 5000);
+    }
 
     setDefaultPerspView();
     frameCameras();
@@ -286,25 +311,28 @@
   }
 
   // "View from top" button: a one-shot recenter, like a CAD "look from
-  // top" preset -- it moves the orbit camera to the reveal position but
-  // leaves OrbitControls fully live, so the user can immediately keep
-  // orbiting/zooming away from there.
+  // top" preset -- it moves the camera to the reveal position but leaves
+  // the controls fully live, so the user can immediately keep
+  // orbiting/zooming away from there. TrackballControls.update() always
+  // ends with object.lookAt(target) using the *current* camera.up -- and
+  // since free dragging rotates camera.up along with everything else (see
+  // initScene), it can end up pointing anywhere, including parallel to
+  // this dead-straight-down view direction, which would make lookAt
+  // degenerate. Resetting up to a fixed, perpendicular value first avoids
+  // that and also makes the button land on the same roll every time.
   function viewFromTop() {
     orbitControls.target.set(0, 0, 0);
+    perspCamera.up.set(0, 0, -1);
     positionRevealCamera(perspCamera, true);
     orbitControls.update();
   }
 
+  // Rebuilding on a parameter change deliberately leaves the user's current
+  // orbit position (or a "view from top" recenter) alone, same as any CAD
+  // tool: editing a dimension shouldn't yank the camera back. Only the
+  // always-on reference pane (topCamera, no user controls) re-frames here.
   function frameCameras() {
-    const maxDim = Math.max(state.L, state.W, state.H * 2, 20);
-    const dist = maxDim * 1.7;
-    perspCamera.position.set(dist * 0.55, dist * 0.6, dist * 0.85);
-    const focusY = state.H * 0.3;
-    perspCamera.lookAt(0, focusY, 0);
-    orbitControls.target.set(0, focusY, 0);
-    orbitControls.update();
-
-    positionRevealCamera(topCamera, true);
+    if (topCamera) positionRevealCamera(topCamera, true);
   }
 
   function resizeRendererToDisplaySize(renderer) {
@@ -325,14 +353,15 @@
     if (resizeRendererToDisplaySize(perspRenderer)) {
       perspCamera.aspect = perspRenderer.domElement.clientWidth / perspRenderer.domElement.clientHeight;
       perspCamera.updateProjectionMatrix();
+      orbitControls.handleResize(); // TrackballControls caches canvas bounds for drag math
     }
-    if (resizeRendererToDisplaySize(topRenderer)) {
+    if (topRenderer && resizeRendererToDisplaySize(topRenderer)) {
       topCamera.aspect = topRenderer.domElement.clientWidth / topRenderer.domElement.clientHeight;
       topCamera.updateProjectionMatrix();
     }
 
     perspRenderer.render(scene, perspCamera);
-    topRenderer.render(scene, topCamera);
+    if (topRenderer) topRenderer.render(scene, topCamera);
   }
 
   function disposeMap(material) {
@@ -382,6 +411,13 @@
       }
       mesh.material.needsUpdate = true;
     });
+
+    const baseMesh = meshes.base;
+    baseMesh.geometry.dispose();
+    baseMesh.geometry = buildFaceGeometry(fc.base, 1); // flat -- no subdivision needed
+    disposeMap(baseMesh.material);
+    baseMesh.material.color.set(0xd8d8d2);
+    baseMesh.material.needsUpdate = true;
 
     frameCameras();
     updateReadouts(sizeCm, qr);
