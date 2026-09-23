@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perspective QR — Hip Roof Simulator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <h1>Perspective QR</h1>
+      <p class="hint">A QR graphic mounted on a hip-roof solid — it only resolves into a clean, scannable square when viewed from directly overhead, at the chosen scan distance above the ridge.</p>
+
+      <label class="field">
+        <span>QR content / link</span>
+        <input type="text" id="qrText" value="https://interactivematerials.info/2025-11-coded-life" autocomplete="off" spellcheck="false">
+      </label>
+
+      <div class="field">
+        <span>Graphic coverage</span>
+        <div class="toggle" id="facesToggle">
+          <button type="button" data-mode="2" class="active">2 main slopes</button>
+          <button type="button" data-mode="4">All 4 slopes</button>
+        </div>
+      </div>
+
+      <div class="sliders">
+        <div class="slider-field">
+          <div class="slider-row">
+            <span>Base length L</span>
+            <span class="num-wrap"><input type="number" id="L-num" class="dim-input" min="10" max="200" step="0.5" value="25"> cm</span>
+          </div>
+          <input type="range" id="L" min="10" max="200" step="0.5" value="25">
+        </div>
+        <div class="slider-field">
+          <div class="slider-row">
+            <span>Base width W</span>
+            <span class="num-wrap"><input type="number" id="W-num" class="dim-input" min="10" max="200" step="0.5" value="25"> cm</span>
+          </div>
+          <input type="range" id="W" min="10" max="200" step="0.5" value="25">
+        </div>
+        <div class="slider-field">
+          <div class="slider-row">
+            <span>Ridge length R</span>
+            <span class="num-wrap"><input type="number" id="R-num" class="dim-input" min="0" max="60" step="0.5" value="15"> cm</span>
+          </div>
+          <input type="range" id="R" min="0" max="60" step="0.5" value="15">
+        </div>
+        <div class="slider-field">
+          <div class="slider-row">
+            <span>Height H</span>
+            <span class="num-wrap"><input type="number" id="H-num" class="dim-input" min="1" max="120" step="0.5" value="5"> cm</span>
+          </div>
+          <input type="range" id="H" min="1" max="120" step="0.5" value="5">
+        </div>
+        <div class="slider-field">
+          <div class="slider-row">
+            <span>Scan distance (above ridge)</span>
+            <span class="num-wrap"><input type="number" id="viewDist-num" class="dim-input" min="0" max="150" step="0.5" value="40"> cm</span>
+          </div>
+          <input type="range" id="viewDist" min="0" max="150" step="0.5" value="40">
+        </div>
+      </div>
+
+      <p class="readout" id="qrSizeReadout"></p>
+      <p class="warn" id="warnReadout" hidden></p>
+
+      <div class="field">
+        <span>File format</span>
+        <div class="toggle" id="formatToggle">
+          <button type="button" data-format="PDF" class="active">PDF</button>
+          <button type="button" data-format="SVG">SVG</button>
+          <button type="button" data-format="PNG">PNG</button>
+        </div>
+      </div>
+
+      <div class="field" id="pageSizeField">
+        <span>Print paper size</span>
+        <div class="toggle" id="pageSizeToggle">
+          <button type="button" data-size="A4" class="active">A4</button>
+          <button type="button" data-size="A3">A3</button>
+        </div>
+      </div>
+      <p class="readout" id="pageCountReadout"></p>
+
+      <button type="button" id="downloadBtn">Download print-ready PDF</button>
+      <p class="hint" id="pdfHint">Pieces larger than one sheet are tiled across multiple pages with cut guides and page labels — print at 100% / actual size (turn off "fit to page" in your print dialog), then trim and tape the tiles together.</p>
+      <p class="hint" id="rasterHint" hidden>One true-scale file per piece (the trapezoid graphic, plus two triangles in 4-face mode), each labeled with its dimensions.</p>
+
+      <details class="about">
+        <summary>How this works</summary>
+        <p>The solid is a hip roof: a rectangular base (L×W) topped by a shorter ridge (R) at height H. R=0 gives a pyramid; R=L gives a plain gable-roof prism. Each sloped face is pre-warped for a camera positioned the chosen scan distance above the ridge top, looking straight down — e.g. the realistic distance someone would hold a phone to scan it — so the whole graphic reassembles into a clean, scannable square only from that vantage point. From any other angle, or a different distance, it looks bent across the ridge.</p>
+      </details>
+    </aside>
+
+    <main class="viewports">
+      <div class="viewport">
+        <h2>Perspective view (drag to orbit)</h2>
+        <button type="button" id="topViewBtn" class="viewport-btn">View from top ⤒</button>
+        <canvas id="perspCanvas"></canvas>
+      </div>
+      <div class="viewport">
+        <h2>Top-down view (the reveal)</h2>
+        <canvas id="topCanvas"></canvas>
+      </div>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
