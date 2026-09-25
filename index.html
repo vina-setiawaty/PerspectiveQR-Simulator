@@ -72,6 +72,7 @@
           <button type="button" data-format="PDF" class="active">PDF</button>
           <button type="button" data-format="SVG">SVG</button>
           <button type="button" data-format="PNG">PNG</button>
+          <button type="button" data-format="3MF">3D model</button>
         </div>
       </div>
 
@@ -87,6 +88,7 @@
       <button type="button" id="downloadBtn">Download print-ready PDF</button>
       <p class="hint" id="pdfHint">Pieces larger than one sheet are tiled across multiple pages with cut guides and page labels — print at 100% / actual size (turn off "fit to page" in your print dialog), then trim and tape the tiles together.</p>
       <p class="hint" id="rasterHint" hidden>One true-scale file per piece (the trapezoid graphic, plus two triangles in 4-face mode), each labeled with its dimensions.</p>
+      <p class="hint" id="modelHint" hidden>A single .3mf file with the solid as one part and the QR modules as a second part, embedded 5mm into the surface — one color per part. In PrusaSlicer/OrcaSlicer/Bambu Studio, the model loads as one object with two parts already in place; just assign each part its own filament/color for a multi-material print.</p>
 
       <details class="about">
         <summary>How this works</summary>

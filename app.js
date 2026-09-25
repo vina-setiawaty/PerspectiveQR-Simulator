@@ -26,10 +26,13 @@
   const DEFAULT_FOV = 45;
   const TOP_VIEW_FOV = 60;
   const MIN_VIEW_DIST_CM = 0.5; // floor to avoid a divide-by-zero right at the ridge
+  const MM_PER_CM = 10;
+  const QR_EMBED_DEPTH_CM = 0.2;    // 2mm -- how deep the QR-module body reaches into the prism
+  const QR_EMBED_PROTRUDE_CM = 0;   // flush with the surface, not raised above it -- no embossed look
 
   const state = {
-    L: 25, W: 25, R: 15, H: 5,
-    viewDist: 40, // scan/reveal distance above the ridge top -- see revealCameraHeight()
+    L: 21, W: 16, R: 10, H: 5,
+    viewDist: 30, // scan/reveal distance above the ridge top -- see revealCameraHeight()
     qrText: 'https://interactivematerials.info/2025-11-coded-life',
     facesMode: 2,
     pageSize: 'A4',
@@ -71,6 +74,67 @@
     };
   }
 
+  // 2D (cm-space), per-piece counterparts of faceCornerSets' 3D corners --
+  // the same physical unfolding buildTrapezoidPiece/buildTrianglePiece use
+  // for the flat SVG/PNG/PDF export, not yet placed within the shared
+  // texture atlas (see buildAtlasLayout). bilinear(p00,p10,p11,p01,s,t) with
+  // these reproduces invertFaceProjection's rawB/vPiece formulas exactly
+  // (algebraically verified against them), so this is the same unfolding
+  // wired into the live-preview path, not a new/different one.
+  function pieceCornerSets2D(s) {
+    const sh = Math.sqrt((s.W / 2) ** 2 + s.H ** 2);
+    const sh2 = Math.sqrt(((s.L - s.R) / 2) ** 2 + s.H ** 2);
+    return {
+      sh, sh2,
+      front: { p00: [-s.L / 2, 0], p10: [s.L / 2, 0], p11: [s.R / 2, sh], p01: [-s.R / 2, sh] },
+      back:  { p00: [-s.L / 2, 2 * sh], p10: [s.L / 2, 2 * sh], p11: [s.R / 2, sh], p01: [-s.R / 2, sh] },
+      left:  { p00: [-s.W / 2, 0], p10: [s.W / 2, 0], p11: [0, sh2], p01: [0, sh2] },
+      right: { p00: [-s.W / 2, 0], p10: [s.W / 2, 0], p11: [0, sh2], p01: [0, sh2] },
+    };
+  }
+
+  function bilinear2D(p00, p10, p11, p01, s, t) {
+    const w00 = (1 - s) * (1 - t), w10 = s * (1 - t), w11 = s * t, w01 = (1 - s) * t;
+    return [
+      w00 * p00[0] + w10 * p10[0] + w11 * p11[0] + w01 * p01[0],
+      w00 * p00[1] + w10 * p10[1] + w11 * p11[1] + w01 * p01[1],
+    ];
+  }
+
+  // Where each piece sits within the shared atlas canvas -- the trapezoid
+  // (front+back, joined at the ridge fold) along the top, and, when the hip
+  // ends are shown, the two triangles centered side by side below it.
+  function buildAtlasLayout(s, showHipEnds) {
+    const pieceCorners = pieceCornerSets2D(s);
+    const { sh, sh2 } = pieceCorners;
+    const trapWidth = s.L, trapHeight = 2 * sh;
+    const triWidth = s.W, triHeight = sh2;
+    const widthCm = showHipEnds ? Math.max(trapWidth, 2 * triWidth) : trapWidth;
+    const heightCm = trapHeight + (showHipEnds ? triHeight : 0);
+    // Per face: where its own local (cm) origin lands in atlas cm-space.
+    const centers = { front: [widthCm / 2, 0], back: [widthCm / 2, 0] };
+    if (showHipEnds) {
+      centers.left = [widthCm / 2 - triWidth / 2, trapHeight];
+      centers.right = [widthCm / 2 + triWidth / 2, trapHeight];
+    }
+    return { widthCm, heightCm, pieceCorners, centers };
+  }
+
+  function atlasPositionCm(layout, faceKey, s, t) {
+    const corners = layout.pieceCorners[faceKey];
+    const [localX, localY] = bilinear2D(corners.p00, corners.p10, corners.p11, corners.p01, s, t);
+    const [cx, baseY] = layout.centers[faceKey];
+    return [localX + cx, localY + baseY];
+  }
+
+  // A face's mesh (s,t) grid point, placed within the shared atlas and
+  // normalized to 0..1 -- the atlas equivalent of buildFaceGeometry's naive
+  // `uvs[ui++] = s; uvs[ui++] = t`.
+  function atlasUV(layout, faceKey, s, t) {
+    const [x, y] = atlasPositionCm(layout, faceKey, s, t);
+    return [x / layout.widthCm, y / layout.heightCm];
+  }
+
   // P(s,t) = (1-s)(1-t)p00 + s(1-t)p10 + s t p11 + (1-s) t p01
   function bilinear(p00, p10, p11, p01, s, t, out) {
     const w00 = (1 - s) * (1 - t), w10 = s * (1 - t), w11 = s * t, w01 = (1 - s) * t;
@@ -80,7 +144,10 @@
     return out;
   }
 
-  function buildFaceGeometry(corners, n) {
+  // `uvFn(s,t) => [u,v]` overrides the naive uv=(s,t) mapping -- used to
+  // place a face within the shared texture atlas (see buildAtlasLayout)
+  // instead of giving it the full [0,1] square to itself.
+  function buildFaceGeometry(corners, n, uvFn) {
     const { p00, p10, p11, p01 } = corners;
     const positions = new Float32Array((n + 1) * (n + 1) * 3);
     const uvs = new Float32Array((n + 1) * (n + 1) * 2);
@@ -92,7 +159,12 @@
         const s = i / n;
         bilinear(p00, p10, p11, p01, s, t, tmp);
         positions[pi++] = tmp[0]; positions[pi++] = tmp[1]; positions[pi++] = tmp[2];
-        uvs[ui++] = s; uvs[ui++] = t;
+        if (uvFn) {
+          const [uu, vv] = uvFn(s, t);
+          uvs[ui++] = uu; uvs[ui++] = vv;
+        } else {
+          uvs[ui++] = s; uvs[ui++] = t;
+        }
       }
     }
     const indices = [];
@@ -385,6 +457,15 @@
       tex.magFilter = THREE.LinearFilter;
       tex.minFilter = THREE.LinearMipmapLinearFilter;
       tex.generateMipmaps = true;
+      // Without this, sharply foreshortened faces (the hip triangles read at
+      // a far more oblique angle than the front-facing trapezoid slopes from
+      // the default camera) get uniformly over-blurred: ordinary trilinear
+      // filtering picks one mip level per pixel based on the WORST-case
+      // (steepest) minification direction, so a face that's compressed hard
+      // in only one screen direction still gets blurred in both.
+      // Anisotropic filtering samples along the actual stretch direction
+      // instead, keeping such faces legible.
+      tex.anisotropy = perspRenderer.capabilities.getMaxAnisotropy();
       tex.needsUpdate = true;
       disposeMap(mesh.material);
       mesh.material.map = tex;
@@ -403,6 +484,7 @@
         tex.magFilter = THREE.LinearFilter;
         tex.minFilter = THREE.LinearMipmapLinearFilter;
         tex.generateMipmaps = true;
+        tex.anisotropy = perspRenderer.capabilities.getMaxAnisotropy();
         tex.needsUpdate = true;
         mesh.material.map = tex;
         mesh.material.color.set(0xffffff);
@@ -503,6 +585,17 @@
     if (Math.abs(Bwidth) < 1e-9) return null;
     const s = (rawB - Boffset) / Bwidth;
     return { s, t, rawB };
+  }
+
+  // Forward counterpart of invertFaceProjection's projection model -- maps a
+  // 3D point to its position in the shared "as seen from the reveal camera"
+  // plane (the same (u,w) space moduleTargetCorners lays QR modules out in).
+  // Used by the .3mf export to find each face's own boundary in that shared
+  // plane, so a QR module can be clipped against it directly instead of
+  // guessing which face it belongs to.
+  function forwardProject(p, camHeight) {
+    const scale = camHeight / (camHeight - p[1]);
+    return [p[0] * scale, p[2] * scale];
   }
 
   function moduleTargetCorners(qr, sizeCm, row, col) {
@@ -901,6 +994,532 @@
     });
   }
 
+  // ---------- 3D model (.3mf) export for multi-color 3D printing ----------
+  //
+  // Two printable parts sharing one object, so a multi-material slicer
+  // (PrusaSlicer/OrcaSlicer/Bambu Studio) loads them pre-assembled and ready
+  // for a per-part filament/color assignment:
+  //   - "Prism body": the unmodified hip-roof solid, full depth, one color.
+  //   - "QR embed body": one small box per dark module, sitting flush with
+  //     the outer surface and reaching QR_EMBED_DEPTH_CM into the solid.
+  // The QR boxes deliberately overlap the (un-pocketed) prism volume rather
+  // than being boolean-subtracted from it -- these slicers resolve that
+  // themselves at slice time (a part later in the list wins in the region
+  // where parts overlap, the standard technique for embedding a logo/pattern
+  // in a second color), so no CSG engine is needed here.
+
+  function vSub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+  function vAdd(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+  function vScale(a, k) { return [a[0] * k, a[1] * k, a[2] * k]; }
+  function vCross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+  function vDot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+  function vLen(a) { return Math.sqrt(vDot(a, a)); }
+  function vNormalize(a) { const l = vLen(a); return l < 1e-12 ? [0, 0, 0] : [a[0] / l, a[1] / l, a[2] / l]; }
+
+  // Appends one triangle's 3 vertices (9 floats) to `out`, choosing winding
+  // order so its normal faces away from `interiorRef` -- a point known to
+  // sit inside the solid. This sidesteps hand-tracking winding per face.
+  // Zero-area triangles are dropped rather than emitted: the hip-end faces
+  // are built from a "collapsed quad" (two corners coincide, see
+  // faceCornerSets) that fans out to a point, and the last row of its grid
+  // is degenerate by construction -- left in, that's exactly the kind of
+  // defect a slicer's mesh-repair step flags on import.
+  function pushTriangle(out, interiorRef, p0, p1, p2) {
+    const n = vCross(vSub(p1, p0), vSub(p2, p0));
+    if (vLen(n) < 1e-9) return;
+    const ordered = vDot(n, vSub(p0, interiorRef)) >= 0 ? [p0, p1, p2] : [p0, p2, p1];
+    ordered.forEach((p) => out.push(p[0], p[1], p[2]));
+  }
+
+  // A single representative outward normal for a whole (possibly gently
+  // curved) face, from its 4 corners rather than a per-module quad. Every
+  // module box on a face offsets along this SAME vector, so touching
+  // modules' shared edges land on bit-identical 3D points -- required for
+  // buildQrEmbedTriangles' neighbor-adjacency wall-skipping below to
+  // actually produce coincident (weldable) geometry instead of a sliver
+  // gap or overlap between boxes whose normals would otherwise differ by
+  // the surface's curvature.
+  function computeFaceOutwardNormal(corners, interiorRef) {
+    const { p00, p10, p11, p01 } = corners;
+    const n = vNormalize(vCross(vSub(p10, p00), vSub(p01, p00)));
+    const centroid = vScale(vAdd(vAdd(p00, p10), vAdd(p11, p01)), 0.25);
+    return vDot(n, vSub(centroid, interiorRef)) >= 0 ? n : vScale(n, -1);
+  }
+
+  // Reads a THREE.BufferGeometry's indexed triangles into the flat,
+  // consistently-wound export list.
+  function appendGeometryTriangles(geo, interiorRef, out) {
+    const pos = geo.attributes.position.array;
+    const idx = geo.index.array;
+    for (let i = 0; i < idx.length; i += 3) {
+      const i0 = idx[i] * 3, i1 = idx[i + 1] * 3, i2 = idx[i + 2] * 3;
+      pushTriangle(
+        out, interiorRef,
+        [pos[i0], pos[i0 + 1], pos[i0 + 2]],
+        [pos[i1], pos[i1 + 1], pos[i1 + 2]],
+        [pos[i2], pos[i2 + 1], pos[i2 + 2]]
+      );
+    }
+  }
+
+  // The unmodified hip-roof solid (front/back/left/right slopes + base),
+  // watertight, at full depth -- same shape as the live preview, just
+  // exported as flat-wound triangles instead of a shaded THREE mesh.
+  function buildPrismSolidTriangles(s) {
+    const v = computeVertices(s);
+    const fc = faceCornerSets(v);
+    const interiorRef = [0, s.H * 0.3, 0]; // same interior point used to frame the perspective camera -- safely inside the solid for any valid L/W/R/H
+    const out = [];
+    ['front', 'back', 'left', 'right'].forEach((key) => {
+      const geo = buildFaceGeometry(fc[key], GRID_N);
+      appendGeometryTriangles(geo, interiorRef, out);
+      geo.dispose();
+    });
+    // Subdivided at the same GRID_N as the sloped faces (even though flat
+    // and needing none of its own) so its boundary lands on the exact same
+    // points as their bottom edges -- a coarser base grid would leave a
+    // T-junction seam there (many fine edge-segments on the sloped side
+    // with no matching edge to weld against on the base side).
+    const baseGeo = buildFaceGeometry(fc.base, GRID_N);
+    appendGeometryTriangles(baseGeo, interiorRef, out);
+    baseGeo.dispose();
+    return out;
+  }
+
+  // Each dark QR module is a small square in the shared "as seen from the
+  // reveal camera" plane (moduleTargetCorners) -- the same plane
+  // forwardProject maps 3D points into. A face's own boundary, projected
+  // into that same plane via forwardProject on its corners, is therefore
+  // directly comparable to a module's square in that plane: clipping the
+  // module against the face boundary (Sutherland-Hodgman -- both are
+  // convex, so the result is always a single convex polygon) gives exactly
+  // the portion of that module which belongs on this face, and nothing
+  // else.
+  //
+  // This replaces an earlier approach that picked, per module CORNER, a
+  // single "best-fit" face and forced that corner onto it: a module
+  // straddling a seam between two differently-angled faces (front vs. a hip
+  // triangle, especially in 4-slope mode) would then get corners offset
+  // along two unrelated face normals, warping its box into a non-planar
+  // shape -- the root cause of the QR embed body coming out broken/non-
+  // manifold on 4 slopes. Clipping instead gives each sub-polygon to
+  // exactly one face, so every extruded box is flat and built from a
+  // single normal, with no per-box orientation guesswork needed (see
+  // buildExtrudedPrism) and no whole-mesh seam-repair pass required
+  // afterwards: two faces sharing an edge clip against the same shared line
+  // in this plane, so their sub-polygons land on identical 3D points once
+  // each is mapped back through its own (different) face parametrization.
+
+  function polygonSignedArea(poly) {
+    let a = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const [x1, y1] = poly[i], [x2, y2] = poly[(i + 1) % poly.length];
+      a += x1 * y2 - x2 * y1;
+    }
+    return a / 2;
+  }
+
+  function cross2(a, b, p) { return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]); }
+
+  function lineIntersect2D(a1, a2, b1, b2) {
+    const A1 = a2[1] - a1[1], B1 = a1[0] - a2[0], C1 = A1 * a1[0] + B1 * a1[1];
+    const A2 = b2[1] - b1[1], B2 = b1[0] - b2[0], C2 = A2 * b1[0] + B2 * b1[1];
+    const det = A1 * B2 - A2 * B1;
+    if (Math.abs(det) < 1e-12) return b2;
+    return [(B2 * C1 - B1 * C2) / det, (A1 * C2 - A2 * C1) / det];
+  }
+
+  // Sutherland-Hodgman clipping of `subject` against convex polygon `clip`
+  // -- works for either winding order of `clip` (its own signed area picks
+  // the "inside" sign), which matters here since a face boundary's winding
+  // after forwardProject depends on that face's own corner order.
+  //
+  // Each output point is tagged `boundary: true` iff it was newly created by
+  // an intersection (i.e. it lies exactly ON the clip edge) rather than kept
+  // from the original subject polygon -- buildQrEmbedTriangles uses that tag
+  // to tell a module's true interior corners from the seam points where it
+  // was actually cut, since only the latter need a blended offset normal
+  // (see blendedNormalAt).
+  function clipPolygonConvex(subject, clip) {
+    let output = subject.map((p) => ({ pt: p, boundary: false }));
+    const sign = polygonSignedArea(clip) >= 0 ? 1 : -1;
+    for (let i = 0; i < clip.length && output.length; i++) {
+      const c1 = clip[i], c2 = clip[(i + 1) % clip.length];
+      if (Math.abs(c1[0] - c2[0]) < 1e-9 && Math.abs(c1[1] - c2[1]) < 1e-9) continue; // degenerate edge (triangular face's collapsed corner)
+      const input = output;
+      output = [];
+      for (let j = 0; j < input.length; j++) {
+        const curr = input[j], prev = input[(j - 1 + input.length) % input.length];
+        const currIn = sign * cross2(c1, c2, curr.pt) >= -1e-9;
+        const prevIn = sign * cross2(c1, c2, prev.pt) >= -1e-9;
+        if (currIn) {
+          if (!prevIn) output.push({ pt: lineIntersect2D(c1, c2, prev.pt, curr.pt), boundary: true });
+          output.push(curr);
+        } else if (prevIn) {
+          output.push({ pt: lineIntersect2D(c1, c2, prev.pt, curr.pt), boundary: true });
+        }
+      }
+    }
+    return output;
+  }
+
+  // Whether (u,w) lies on the perimeter of convex polygon `poly` (within
+  // `tol`) -- point-to-segment distance against every edge.
+  function pointOnPolygonBoundary(poly, u, w, tol) {
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      const abx = b[0] - a[0], aby = b[1] - a[1];
+      const len2 = abx * abx + aby * aby;
+      if (len2 < 1e-12) continue;
+      const t = Math.max(0, Math.min(1, ((u - a[0]) * abx + (w - a[1]) * aby) / len2));
+      const dx = u - (a[0] + t * abx), dy = w - (a[1] + t * aby);
+      if (dx * dx + dy * dy < tol * tol) return true;
+    }
+    return false;
+  }
+
+  // The offset normal for a clip-created (seam) vertex: a module cut between
+  // two faces has its two pieces meet only along the shared top edge, since
+  // each would otherwise offset that same edge into the solid along its OWN
+  // face's normal, leaving two DIFFERENT bottom edges (a non-manifold edge
+  // where they meet, 4 faces converging on one line instead of 2). Using the
+  // faces' averaged normal instead, for BOTH pieces, makes them offset that
+  // shared edge identically -- their walls there become fully coincident and
+  // get deduplicated by resolveWallCandidates, same as two same-face
+  // neighbors. A point that isn't a genuine inter-face seam (e.g. the outer
+  // bottom rim, which borders no other QR-textured face) falls back to the
+  // single owning face's own normal, unchanged.
+  function blendedNormalAt(faceKeys, faceBoundaries, faceNormals, ownKey, u, w) {
+    let sum = faceNormals[ownKey], blended = false;
+    faceKeys.forEach((otherKey) => {
+      if (otherKey === ownKey) return;
+      if (pointOnPolygonBoundary(faceBoundaries[otherKey], u, w, 1e-4)) {
+        sum = vAdd(sum, faceNormals[otherKey]);
+        blended = true;
+      }
+    });
+    return blended ? vNormalize(sum) : faceNormals[ownKey];
+  }
+
+  // A face's own boundary, in the same shared plane moduleTargetCorners
+  // lays QR modules out in -- straight 3D edges project to straight lines
+  // under this central projection, so this is just forwardProject on the
+  // face's corners (deduplicated, since a hip triangle's corners come in as
+  // a collapsed quad -- see faceCornerSets).
+  function faceBoundaryUW(corners, camHeight) {
+    const pts = [corners.p00, corners.p10, corners.p11, corners.p01].map((p) => forwardProject(p, camHeight));
+    return pts.filter((p, i) => {
+      const prev = pts[(i - 1 + pts.length) % pts.length];
+      return Math.abs(p[0] - prev[0]) > 1e-9 || Math.abs(p[1] - prev[1]) > 1e-9;
+    });
+  }
+
+  function weldKey(p) { return Math.round(p[0] * 1e6) + ',' + Math.round(p[1] * 1e6) + ',' + Math.round(p[2] * 1e6); }
+
+  function addWallQuad(out, interiorRef, P, Q, R, S) {
+    pushTriangle(out, interiorRef, P, Q, R);
+    pushTriangle(out, interiorRef, P, R, S);
+  }
+
+  // Extrudes one convex, planar polygon (a clipped module piece, already in
+  // 3D, entirely on one face) into a closed box: top and bottom caps go
+  // straight into `out`, but a wall is only ever a CANDIDATE at this point
+  // -- pushed into `wallCandidates` and tallied in `wallEdgeCount` instead of
+  // drawn immediately. `normals` is one outward direction per vertex -- the
+  // same shared value for every vertex except a seam point, which carries a
+  // blended normal instead (see blendedNormalAt), so two touching pieces
+  // (same-face grid neighbors, or the two seam-clipped halves of one
+  // straddling module) always compute IDENTICAL top and bottom points for
+  // their shared wall.
+  //
+  // resolveWallCandidates (below), run once after every piece in the model
+  // has been processed, keeps a wall only where wallEdgeCount says exactly
+  // ONE piece claimed that edge (a genuine exterior boundary) and drops it
+  // where two pieces claimed it: since both sides' top AND bottom edges
+  // coincide there, the wall would be a zero-thickness internal partition
+  // between two touching solids -- correct union boundary is to have NO
+  // face there at all, just the two pieces' top caps (and separately their
+  // bottom caps) meeting directly, which is exactly what dropping it leaves
+  // behind. (An earlier version drew both copies and tried to cancel the
+  // matching pair by opposite winding, but two independently-computed
+  // per-box interior-reference points have no guarantee of landing on truly
+  // opposite sides of a shared wall once a box has a mix of blended and
+  // unblended vertex normals -- so the two copies could come out with the
+  // SAME winding and simply fail to cancel, which is exactly the residual
+  // non-manifold edges this replaced.)
+  function buildExtrudedPrism(out, topPoly, normals, wallCandidates, wallEdgeCount) {
+    const n = topPoly.length;
+    const topOff = topPoly.map((p, i) => vAdd(p, vScale(normals[i], QR_EMBED_PROTRUDE_CM)));
+    const bottomOff = topPoly.map((p, i) => vSub(p, vScale(normals[i], QR_EMBED_DEPTH_CM)));
+    const interiorRef = vScale(topOff.concat(bottomOff).reduce((a, p) => vAdd(a, p), [0, 0, 0]), 1 / (2 * n));
+    for (let i = 1; i < n - 1; i++) pushTriangle(out, interiorRef, topOff[0], topOff[i], topOff[i + 1]);
+    for (let i = 1; i < n - 1; i++) pushTriangle(out, interiorRef, bottomOff[0], bottomOff[i], bottomOff[i + 1]);
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const edgeKey = [weldKey(topOff[i]), weldKey(topOff[j])].sort().join('|');
+      wallEdgeCount.set(edgeKey, (wallEdgeCount.get(edgeKey) || 0) + 1);
+      wallCandidates.push({ edgeKey, interiorRef, P: topOff[i], Q: topOff[j], R: bottomOff[j], S: bottomOff[i] });
+    }
+  }
+
+  function resolveWallCandidates(out, wallCandidates, wallEdgeCount) {
+    wallCandidates.forEach(({ edgeKey, interiorRef, P, Q, R, S }) => {
+      if (wallEdgeCount.get(edgeKey) === 1) addWallQuad(out, interiorRef, P, Q, R, S);
+    });
+  }
+
+  // moduleTargetCorners' 4 corners in (col,row) terms are
+  // [bottom-left, bottom-right, top-right, top-left]; corner ci's DIAGONAL
+  // grid neighbor (the one other module that touches ONLY at that single
+  // point) is at MODULE_CORNER_DIAGONALS[ci], and its two EDGE neighbors
+  // (which share a full edge -- and so a real wall -- through that same
+  // point) are at (row+dr,col) and (row,col+dc).
+  const MODULE_CORNER_DIAGONALS = [[-1, -1], [-1, 1], [1, 1], [1, -1]];
+  const CHECKERBOARD_INSET_FRAC = 0.08; // fraction of the way from a touched corner toward this piece's own center
+
+  function moduleHasFaceGeometry(qr, sizeCm, faceBoundaries, key, row, col, minAreaCm2) {
+    if (row < 0 || row >= qr.size || col < 0 || col >= qr.size || !qr.modules.get(row, col)) return false;
+    const clipped = clipPolygonConvex(moduleTargetCorners(qr, sizeCm, row, col), faceBoundaries[key]);
+    return clipped.length >= 3 && Math.abs(polygonSignedArea(clipped.map((o) => o.pt))) >= minAreaCm2;
+  }
+
+  // Two modules whose squares touch ONLY diagonally (a checkerboard corner)
+  // independently draw a box at that shared grid point -- and since both
+  // sit on the same face with the same (unblended) normal, their two boxes'
+  // corners land on EXACTLY the same 3D point, top and bottom alike. Unlike
+  // a genuine shared edge (deliberately kept exact so resolveWallCandidates
+  // can recognize and drop it), this coincidence isn't a duplicate of the
+  // SAME wall -- it's two DIFFERENT walls (one from each module's own,
+  // otherwise-unrelated box) that happen to share a vertical edge, which
+  // still leaves that edge non-manifold (4 triangles meeting on it) no
+  // matter how the walls are deduplicated. Nudging ONE corner of THIS
+  // module's box slightly toward its own center -- only when the diagonal
+  // neighbor is genuinely dark on this face AND neither of the two
+  // in-between edge-neighbors also is (which would make this a real shared
+  // edge instead) -- breaks the coincidence without touching any position
+  // a real wall-match depends on.
+  function applyCheckerboardInset(topPoly, qr, sizeCm, faceBoundaries, key, row, col, minAreaCm2) {
+    const centroid = vScale(topPoly.reduce((a, p) => vAdd(a, p), [0, 0, 0]), 1 / topPoly.length);
+    return topPoly.map((p, ci) => {
+      const [dr, dc] = MODULE_CORNER_DIAGONALS[ci];
+      const sharesRealEdge = moduleHasFaceGeometry(qr, sizeCm, faceBoundaries, key, row + dr, col, minAreaCm2)
+        || moduleHasFaceGeometry(qr, sizeCm, faceBoundaries, key, row, col + dc, minAreaCm2);
+      if (sharesRealEdge) return p; // a real edge-neighbor shares this corner -- keep it exact
+      if (!moduleHasFaceGeometry(qr, sizeCm, faceBoundaries, key, row + dr, col + dc, minAreaCm2)) return p;
+      return vAdd(p, vScale(vSub(centroid, p), CHECKERBOARD_INSET_FRAC));
+    });
+  }
+
+  // One small extruded box per dark QR module (or per face-clipped piece of
+  // one, for a module straddling a seam): top flush with (a hair outside)
+  // the true outer surface, bottom QR_EMBED_DEPTH_CM further in along the
+  // face's own outward normal. Reuses the exact same inverse-projection
+  // math as the live texture bake and the flat print pieces, so the
+  // embossed pattern matches what's shown/printed elsewhere pixel-for-pixel.
+  // Touching boxes are fused via resolveWallCandidates below, so contiguous
+  // dark blocks (finder patterns, timing patterns) come out as one
+  // continuous solid rather than a pile of separately-walled boxes.
+  function buildQrEmbedTriangles(s) {
+    const v = computeVertices(s);
+    const fc = faceCornerSets(v);
+    const qr = ensureQR(s.qrText);
+    const sizeCm = qrSizeCm(s);
+    if (sizeCm <= 0 || qr.error) return [];
+    const camHeight = revealCameraHeight(s);
+    const interiorRef = [0, s.H * 0.3, 0];
+    const faceKeys = s.facesMode === 4 ? ['front', 'back', 'left', 'right'] : ['front', 'back'];
+
+    const faceNormals = {}, faceBoundaries = {};
+    faceKeys.forEach((key) => {
+      faceNormals[key] = computeFaceOutwardNormal(fc[key], interiorRef);
+      faceBoundaries[key] = faceBoundaryUW(fc[key], camHeight);
+    });
+
+    const minAreaCm2 = 1e-6; // drops pure numerical slivers at clip boundaries; real geometry is filtered by pushTriangle's own degeneracy check
+    const out = [];
+    const wallCandidates = [];
+    const wallEdgeCount = new Map();
+    for (let row = 0; row < qr.size; row++) {
+      for (let col = 0; col < qr.size; col++) {
+        if (!qr.modules.get(row, col)) continue;
+        const moduleQuad = moduleTargetCorners(qr, sizeCm, row, col);
+        faceKeys.forEach((key) => {
+          const clipped = clipPolygonConvex(moduleQuad, faceBoundaries[key]);
+          if (clipped.length < 3 || Math.abs(polygonSignedArea(clipped.map((o) => o.pt))) < minAreaCm2) return;
+          const topPoly = [], vertexNormals = [];
+          for (const { pt: [u, w], boundary } of clipped) {
+            const r = invertFaceProjection(fc[key], u, w, camHeight);
+            if (!r) return;
+            const ss = Math.min(1, Math.max(0, r.s)), tt = Math.min(1, Math.max(0, r.t));
+            const c = fc[key];
+            topPoly.push(bilinear(c.p00, c.p10, c.p11, c.p01, ss, tt, [0, 0, 0]));
+            vertexNormals.push(boundary ? blendedNormalAt(faceKeys, faceBoundaries, faceNormals, key, u, w) : faceNormals[key]);
+          }
+          const insetPoly = clipped.length === 4 && clipped.every((o) => !o.boundary)
+            ? applyCheckerboardInset(topPoly, qr, sizeCm, faceBoundaries, key, row, col, minAreaCm2)
+            : topPoly;
+          buildExtrudedPrism(out, insetPoly, vertexNormals, wallCandidates, wallEdgeCount);
+        });
+      }
+    }
+    resolveWallCandidates(out, wallCandidates, wallEdgeCount);
+    return out;
+  }
+
+  // `tris` (a flat [x,y,z, x,y,z, ...] list, 3 floats per vertex, 3
+  // vertices per triangle, no sharing) is the easy shape to build triangles
+  // into, but leaving it unwelded means every face seam and every touching
+  // pair of module-box vertices is duplicated -- geometrically coincident,
+  // but topologically disconnected, which is again something a slicer's
+  // manifold check can flag. Snapping each vertex to a coordinate key at
+  // well below printing precision merges those duplicates into one real,
+  // shared-index vertex, so adjoining faces/boxes actually share edges.
+  function weldToIndexedMesh(tris, precision) {
+    const scale = Math.pow(10, precision == null ? 6 : precision);
+    const keyToIndex = new Map();
+    const vertices = [];
+    const nVerts = tris.length / 3;
+    const remap = new Int32Array(nVerts);
+    for (let i = 0; i < nVerts; i++) {
+      const x = tris[i * 3], y = tris[i * 3 + 1], z = tris[i * 3 + 2];
+      const key = Math.round(x * scale) + '_' + Math.round(y * scale) + '_' + Math.round(z * scale);
+      let idx = keyToIndex.get(key);
+      if (idx === undefined) {
+        idx = vertices.length;
+        vertices.push([x, y, z]);
+        keyToIndex.set(key, idx);
+      }
+      remap[i] = idx;
+    }
+    const indices = [];
+    for (let i = 0; i < nVerts; i += 3) {
+      const a = remap[i], b = remap[i + 1], c = remap[i + 2];
+      if (a === b || b === c || a === c) continue; // welding can turn a sliver into a degenerate triangle -- drop it same as pushTriangle does
+      indices.push([a, b, c]);
+    }
+    return { vertices, indices };
+  }
+
+  function trianglesXmlObject(objId, name, pindex, mesh) {
+    let vertsXml = '';
+    mesh.vertices.forEach(([x, y, z]) => {
+      vertsXml += `<vertex x="${(x * MM_PER_CM).toFixed(4)}" y="${(y * MM_PER_CM).toFixed(4)}" z="${(z * MM_PER_CM).toFixed(4)}"/>`;
+    });
+    let trisXml = '';
+    mesh.indices.forEach(([a, b, c]) => {
+      trisXml += `<triangle v1="${a}" v2="${b}" v3="${c}"/>`;
+    });
+    return `<object id="${objId}" type="model" name="${escapeXml(name)}" pid="1" pindex="${pindex}"><mesh><vertices>${vertsXml}</vertices><triangles>${trisXml}</triangles></mesh></object>`;
+  }
+
+  function build3mfModelXml(prismTris, qrTris) {
+    const prismObj = trianglesXmlObject(10, 'Prism body', 0, weldToIndexedMesh(prismTris));
+    const hasQr = qrTris.length > 0;
+    const qrObj = hasQr ? trianglesXmlObject(20, 'QR embed body', 1, weldToIndexedMesh(qrTris)) : '';
+    const components = hasQr
+      ? '<component objectid="10"/><component objectid="20"/>'
+      : '<component objectid="10"/>';
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+  <resources>
+    <m:colorgroup id="1">
+      <m:color color="${rgbToHex(BG_RGB)}"/>
+      <m:color color="${rgbToHex(DARK_RGB)}"/>
+    </m:colorgroup>
+    ${prismObj}
+    ${qrObj}
+    <object id="1" type="model" name="${escapeXml('QR Hip Roof ' + paramCaptionShort(state))}">
+      <components>${components}</components>
+    </object>
+  </resources>
+  <build>
+    <item objectid="1"/>
+  </build>
+</model>`;
+  }
+
+  // ---------- minimal ZIP (store, no compression) for the .3mf container ----------
+
+  const CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      table[n] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(bytes) {
+    let crc = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function u16(n) { return [n & 0xFF, (n >>> 8) & 0xFF]; }
+  function u32(n) { return [n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF]; }
+
+  function buildZip(files) {
+    const encoder = new TextEncoder();
+    const localParts = [];
+    const centralParts = [];
+    let offset = 0;
+    files.forEach(({ name, data }) => {
+      const nameBytes = encoder.encode(name);
+      const crc = crc32(data);
+      const size = data.length;
+      const localHeader = new Uint8Array([
+        0x50, 0x4b, 0x03, 0x04,
+        ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0x21),
+        ...u32(crc), ...u32(size), ...u32(size),
+        ...u16(nameBytes.length), ...u16(0),
+      ]);
+      localParts.push(localHeader, nameBytes, data);
+      const centralHeader = new Uint8Array([
+        0x50, 0x4b, 0x01, 0x02,
+        ...u16(20), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0x21),
+        ...u32(crc), ...u32(size), ...u32(size),
+        ...u16(nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0),
+        ...u32(offset),
+      ]);
+      centralParts.push(centralHeader, nameBytes);
+      offset += localHeader.length + nameBytes.length + size;
+    });
+    const centralStart = offset;
+    const centralSize = centralParts.reduce((sum, p) => sum + p.length, 0);
+    const eocd = new Uint8Array([
+      0x50, 0x4b, 0x05, 0x06,
+      ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length),
+      ...u32(centralSize), ...u32(centralStart), ...u16(0),
+    ]);
+    return new Blob([...localParts, ...centralParts, eocd]);
+  }
+
+  function download3mf() {
+    const sizeCm = qrSizeCm(state);
+    const qr = ensureQR(state.qrText);
+    if (sizeCm <= 0 || qr.error) return;
+    const prismTris = buildPrismSolidTriangles(state);
+    const qrTris = buildQrEmbedTriangles(state);
+    const modelXml = build3mfModelXml(prismTris, qrTris);
+    const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>`;
+    const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>`;
+    const encoder = new TextEncoder();
+    const blob = buildZip([
+      { name: '[Content_Types].xml', data: encoder.encode(contentTypesXml) },
+      { name: '_rels/.rels', data: encoder.encode(relsXml) },
+      { name: '3D/3dmodel.model', data: encoder.encode(modelXml) },
+    ]);
+    downloadBlob(`qr-hip-roof_${paramSlug(state)}.3mf`, blob, 'model/3mf');
+  }
+
   // ---------- UI wiring ----------
 
   const DIM_IDS = ['L', 'W', 'R', 'H', 'viewDist'];
@@ -980,7 +1599,8 @@
     document.getElementById('downloadBtn').addEventListener('click', () => {
       if (state.format === 'PDF') downloadPdf();
       else if (state.format === 'SVG') downloadSvg();
-      else downloadPng();
+      else if (state.format === 'PNG') downloadPng();
+      else download3mf();
     });
 
     document.getElementById('topViewBtn').addEventListener('click', viewFromTop);
@@ -992,12 +1612,15 @@
 
   function updateFormatUI() {
     const isPdf = state.format === 'PDF';
+    const isModel = state.format === '3MF';
     document.getElementById('pageSizeField').hidden = !isPdf;
     document.getElementById('pageCountReadout').hidden = !isPdf;
     document.getElementById('pdfHint').hidden = !isPdf;
-    document.getElementById('rasterHint').hidden = isPdf;
-    document.getElementById('downloadBtn').textContent =
-      isPdf ? 'Download print-ready PDF' : `Download ${state.format}`;
+    document.getElementById('rasterHint').hidden = isPdf || isModel;
+    document.getElementById('modelHint').hidden = !isModel;
+    document.getElementById('downloadBtn').textContent = isPdf
+      ? 'Download print-ready PDF'
+      : isModel ? 'Download 3D model (.3mf)' : `Download ${state.format}`;
   }
 
   // ---------- init ----------
