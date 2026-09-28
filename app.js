@@ -33,7 +33,7 @@
   const state = {
     L: 21, W: 16, R: 10, H: 5,
     viewDist: 30, // scan/reveal distance above the ridge top -- see revealCameraHeight()
-    qrText: 'https://interactivematerials.info/2025-11-coded-life',
+    qrText: 'https://qrcoded.life/angle/',
     facesMode: 2,
     pageSize: 'A4',
     format: 'PDF', // 'PDF' | 'SVG' | 'PNG'
