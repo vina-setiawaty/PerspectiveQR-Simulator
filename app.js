@@ -21,23 +21,37 @@
   const PRINT_DPI = 300;
   const PRINT_PX_PER_CM = PRINT_DPI / 2.54; // final per-tile image res for the downloaded PDF
   const BUFFER_CM = 1;      // total QR buffer (0.5cm per edge)
-  const BG_RGB = [244, 244, 240];
-  const DARK_RGB = [17, 17, 17];
+  const DEFAULT_PRISM_COLOR = '#112777'; // trapezoid (front/back) + base surface
+  const DEFAULT_QR_COLOR = '#ffffff';    // QR modules
+  const TRIANGLE_TINT_FRAC = 0.35;       // how much lighter the triangular hip-end surface is than the prism color
   const DEFAULT_FOV = 45;
   const TOP_VIEW_FOV = 60;
   const MIN_VIEW_DIST_CM = 0.5; // floor to avoid a divide-by-zero right at the ridge
   const MM_PER_CM = 10;
   const QR_EMBED_DEPTH_CM = 0.2;    // 2mm -- how deep the QR-module body reaches into the prism
   const QR_EMBED_PROTRUDE_CM = 0;   // flush with the surface, not raised above it -- no embossed look
+  const MIN_MODULE_AREA_CM2 = 1e-6; // drops pure numerical slivers left over from clipping a module against a face boundary
 
   const state = {
-    L: 21, W: 16, R: 10, H: 5,
-    viewDist: 30, // scan/reveal distance above the ridge top -- see revealCameraHeight()
+    L: 16, W: 21, R: 8, H: 5,
+    viewDist: 10, // scan/reveal distance above the ridge top -- see revealCameraHeight()
     qrText: 'https://qrcoded.life/angle/',
     facesMode: 2,
     pageSize: 'A4',
     format: 'PDF', // 'PDF' | 'SVG' | 'PNG'
+    prismColor: DEFAULT_PRISM_COLOR,
+    qrColor: DEFAULT_QR_COLOR,
   };
+
+  function hexToRgb(hex) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+    if (!m) return [0, 0, 0];
+    return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
+  }
+  function lightenRgb(rgb, frac) { return rgb.map((c) => Math.round(c + (255 - c) * frac)); }
+  function prismRgb(s) { return hexToRgb(s.prismColor); }
+  function qrModuleRgb(s) { return hexToRgb(s.qrColor); }
+  function triangleRgb(s) { return lightenRgb(prismRgb(s), TRIANGLE_TINT_FRAC); }
 
   function fmtCm(n) { return `${Math.round(n * 10) / 10}cm`; }
   function fmtSlug(n) { return (Math.round(n * 10) / 10).toString().replace('.', 'p'); }
@@ -237,17 +251,25 @@
   // sampling of the flat QR bitmap, so no aliasing at module edges
   // regardless of zoom level -- this replaced an earlier version that did
   // exactly that per-pixel sampling and was visibly jagged up close.
+  // Clips each module's target square against THIS face's own boundary (in
+  // the shared reveal-camera plane) instead of testing only the module's
+  // center and then forcing all 4 corners through this face's formula --
+  // the latter is what let a module straddling a seam with a neighboring
+  // face get its far corner clamped flat onto the seam instead of
+  // continuing onto that neighbor, leaving a visible gap where the two
+  // faces' modules should have met exactly. Reuses the same clipping the
+  // 3MF export already relies on for the identical reason (see
+  // buildQrEmbedTriangles).
   function buildFaceModulePolygonsUV(corners, qr, sizeCm, camHeight) {
     const polys = [];
     if (!sizeCm || sizeCm <= 0) return polys;
+    const boundary = faceBoundaryUW(corners, camHeight);
     for (let row = 0; row < qr.size; row++) {
       for (let col = 0; col < qr.size; col++) {
         if (!qr.modules.get(row, col)) continue;
-        const corners4 = moduleTargetCorners(qr, sizeCm, row, col);
-        const cu = (corners4[0][0] + corners4[2][0]) / 2, cw = (corners4[0][1] + corners4[2][1]) / 2;
-        const rc = invertFaceProjection(corners, cu, cw, camHeight);
-        if (!rc || rc.s < -FACE_TOL || rc.s > 1 + FACE_TOL || rc.t < -FACE_TOL || rc.t > 1 + FACE_TOL) continue;
-        const uvPts = corners4.map(([uu, ww]) => {
+        const clipped = clipPolygonConvex(moduleTargetCorners(qr, sizeCm, row, col), boundary);
+        if (clipped.length < 3 || Math.abs(polygonSignedArea(clipped.map((o) => o.pt))) < MIN_MODULE_AREA_CM2) continue;
+        const uvPts = clipped.map(({ pt: [uu, ww] }) => {
           const r = invertFaceProjection(corners, uu, ww, camHeight);
           if (!r) return null;
           return [Math.min(1, Math.max(0, r.s)), Math.min(1, Math.max(0, r.t))];
@@ -259,12 +281,12 @@
     return polys;
   }
 
-  function bakeFaceTexture(corners, qr, sizeCm, res, camHeight) {
+  function bakeFaceTexture(corners, qr, sizeCm, res, camHeight, bgRgb, darkRgb) {
     const polys = buildFaceModulePolygonsUV(corners, qr, sizeCm, camHeight);
     const canvas = document.createElement('canvas');
     canvas.width = res; canvas.height = res;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = `rgb(${BG_RGB.join(',')})`;
+    ctx.fillStyle = `rgb(${bgRgb.join(',')})`;
     ctx.fillRect(0, 0, res, res);
     ctx.beginPath();
     polys.forEach((poly) => {
@@ -274,7 +296,7 @@
       });
       ctx.closePath();
     });
-    ctx.fillStyle = `rgb(${DARK_RGB.join(',')})`;
+    ctx.fillStyle = `rgb(${darkRgb.join(',')})`;
     ctx.fill();
     return canvas;
   }
@@ -447,12 +469,13 @@
     const sizeCm = qrSizeCm(state);
     const showHipEnds = state.facesMode === 4;
     const camHeight = revealCameraHeight(state);
+    const prism = prismRgb(state), tri = triangleRgb(state), dark = qrModuleRgb(state);
 
     ['front', 'back'].forEach((name) => {
       const mesh = meshes[name];
       mesh.geometry.dispose();
       mesh.geometry = buildFaceGeometry(fc[name], GRID_N);
-      const tex = new THREE.CanvasTexture(bakeFaceTexture(fc[name], qr, sizeCm, LIVE_BAKE_RES, camHeight));
+      const tex = new THREE.CanvasTexture(bakeFaceTexture(fc[name], qr, sizeCm, LIVE_BAKE_RES, camHeight, prism, dark));
       tex.flipY = false;
       tex.magFilter = THREE.LinearFilter;
       tex.minFilter = THREE.LinearMipmapLinearFilter;
@@ -479,7 +502,7 @@
       mesh.geometry = buildFaceGeometry(fc[name], GRID_N);
       disposeMap(mesh.material);
       if (showHipEnds) {
-        const tex = new THREE.CanvasTexture(bakeFaceTexture(fc[name], qr, sizeCm, LIVE_BAKE_RES, camHeight));
+        const tex = new THREE.CanvasTexture(bakeFaceTexture(fc[name], qr, sizeCm, LIVE_BAKE_RES, camHeight, tri, dark));
         tex.flipY = false;
         tex.magFilter = THREE.LinearFilter;
         tex.minFilter = THREE.LinearMipmapLinearFilter;
@@ -489,7 +512,7 @@
         mesh.material.map = tex;
         mesh.material.color.set(0xffffff);
       } else {
-        mesh.material.color.set(0xd8d8d2);
+        mesh.material.color.setRGB(tri[0] / 255, tri[1] / 255, tri[2] / 255);
       }
       mesh.material.needsUpdate = true;
     });
@@ -498,7 +521,7 @@
     baseMesh.geometry.dispose();
     baseMesh.geometry = buildFaceGeometry(fc.base, 1); // flat -- no subdivision needed
     disposeMap(baseMesh.material);
-    baseMesh.material.color.set(0xd8d8d2);
+    baseMesh.material.color.setRGB(prism[0] / 255, prism[1] / 255, prism[2] / 255);
     baseMesh.material.needsUpdate = true;
 
     frameCameras();
@@ -606,33 +629,41 @@
     return [[u0, w0], [u1, w0], [u1, w1], [u0, w1]];
   }
 
-  const FACE_TOL = 0.02; // slack on (s,t) validity, absorbs float error at face seams
+  // Clips each module against a face's own boundary (in the shared
+  // reveal-camera plane) and maps the surviving piece back onto that face,
+  // instead of testing only the module's center and forcing all 4 corners
+  // through one face's formula -- the latter clamped a straddling module's
+  // far corner flat onto the seam it crossed rather than letting it
+  // continue onto the neighboring face, leaving a visible gap in print
+  // exports right where two faces (e.g. front and back, at the ridge fold)
+  // are supposed to meet exactly. Same fix, same reason, as the 3MF export's
+  // buildQrEmbedTriangles.
+  function clipModuleToFace(moduleQuad, corners, boundary, camHeight) {
+    const clipped = clipPolygonConvex(moduleQuad, boundary);
+    if (clipped.length < 3 || Math.abs(polygonSignedArea(clipped.map((o) => o.pt))) < MIN_MODULE_AREA_CM2) return null;
+    const pts = clipped.map(({ pt: [uu, ww] }) => {
+      const r = invertFaceProjection(corners, uu, ww, camHeight);
+      if (!r) return null;
+      return { t: Math.min(1, Math.max(0, r.t)), rawB: r.rawB };
+    });
+    return pts.some((p) => !p) ? null : pts;
+  }
 
   function buildTrapezoidPiece(s, qr, sizeCm, camHeight) {
     const sh = Math.sqrt((s.W / 2) ** 2 + s.H ** 2);
     const v = computeVertices(s);
     const fc = faceCornerSets(v);
+    const boundaries = { front: faceBoundaryUW(fc.front, camHeight), back: faceBoundaryUW(fc.back, camHeight) };
     const modulePolys = [];
     for (let row = 0; row < qr.size; row++) {
       for (let col = 0; col < qr.size; col++) {
         if (!qr.modules.get(row, col)) continue;
-        const corners4 = moduleTargetCorners(qr, sizeCm, row, col);
-        const cu = (corners4[0][0] + corners4[2][0]) / 2, cw = (corners4[0][1] + corners4[2][1]) / 2;
-        let faceKey = null;
+        const moduleQuad = moduleTargetCorners(qr, sizeCm, row, col);
         for (const key of ['front', 'back']) {
-          const r = invertFaceProjection(fc[key], cu, cw, camHeight);
-          if (r && r.s >= -FACE_TOL && r.s <= 1 + FACE_TOL && r.t >= -FACE_TOL && r.t <= 1 + FACE_TOL) { faceKey = key; break; }
+          const pts = clipModuleToFace(moduleQuad, fc[key], boundaries[key], camHeight);
+          if (!pts) continue;
+          modulePolys.push(pts.map(({ t, rawB }) => [rawB, key === 'front' ? t * sh : (2 * sh - t * sh)]));
         }
-        if (!faceKey) continue;
-        const piecePts = corners4.map(([uu, ww]) => {
-          const r = invertFaceProjection(fc[faceKey], uu, ww, camHeight);
-          if (!r) return null;
-          const t = Math.min(1, Math.max(0, r.t));
-          const vPiece = faceKey === 'front' ? t * sh : (2 * sh - t * sh);
-          return [r.rawB, vPiece];
-        });
-        if (piecePts.some((p) => !p)) continue;
-        modulePolys.push(piecePts);
       }
     }
     return {
@@ -640,6 +671,8 @@
       outline: [[-s.L / 2, 0], [s.L / 2, 0], [s.R / 2, sh], [s.L / 2, 2 * sh], [-s.L / 2, 2 * sh], [-s.R / 2, sh]],
       foldLines: [sh],
       modulePolys,
+      bgRgb: prismRgb(s),
+      darkRgb: qrModuleRgb(s),
     };
   }
 
@@ -647,26 +680,18 @@
     const sh2 = Math.sqrt(((s.L - s.R) / 2) ** 2 + s.H ** 2);
     const v = computeVertices(s);
     const fc = faceCornerSets(v);
-    const faceKey = side;
+    const boundary = faceBoundaryUW(fc[side], camHeight);
     const modulePolys = [];
     for (let row = 0; row < qr.size; row++) {
       for (let col = 0; col < qr.size; col++) {
         if (!qr.modules.get(row, col)) continue;
-        const corners4 = moduleTargetCorners(qr, sizeCm, row, col);
-        const cu = (corners4[0][0] + corners4[2][0]) / 2, cw = (corners4[0][1] + corners4[2][1]) / 2;
-        const rc = invertFaceProjection(fc[faceKey], cu, cw, camHeight);
-        if (!rc || rc.s < -FACE_TOL || rc.s > 1 + FACE_TOL || rc.t < -FACE_TOL || rc.t > 1 + FACE_TOL) continue;
-        const piecePts = corners4.map(([uu, ww]) => {
-          const r = invertFaceProjection(fc[faceKey], uu, ww, camHeight);
-          if (!r) return null;
-          const t = Math.min(1, Math.max(0, r.t));
-          return [r.rawB, t * sh2];
-        });
-        if (piecePts.some((p) => !p)) continue;
-        modulePolys.push(piecePts);
+        const moduleQuad = moduleTargetCorners(qr, sizeCm, row, col);
+        const pts = clipModuleToFace(moduleQuad, fc[side], boundary, camHeight);
+        if (!pts) continue;
+        modulePolys.push(pts.map(({ t, rawB }) => [rawB, t * sh2]));
       }
     }
-    return { widthCm: s.W, heightCm: sh2, outline: [[-s.W / 2, 0], [s.W / 2, 0], [0, sh2]], foldLines: [], modulePolys };
+    return { widthCm: s.W, heightCm: sh2, outline: [[-s.W / 2, 0], [s.W / 2, 0], [0, sh2]], foldLines: [], modulePolys, bgRgb: triangleRgb(s), darkRgb: qrModuleRgb(s) };
   }
 
   // Rasterizes the vector piece (background fill of its true outline, dark
@@ -686,7 +711,7 @@
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     });
     ctx.closePath();
-    ctx.fillStyle = `rgb(${BG_RGB.join(',')})`;
+    ctx.fillStyle = `rgb(${piece.bgRgb.join(',')})`;
     ctx.fill();
     ctx.beginPath();
     piece.modulePolys.forEach((poly) => {
@@ -696,7 +721,7 @@
       });
       ctx.closePath();
     });
-    ctx.fillStyle = `rgb(${DARK_RGB.join(',')})`;
+    ctx.fillStyle = `rgb(${piece.darkRgb.join(',')})`;
     ctx.fill();
     return canvas;
   }
@@ -909,7 +934,7 @@
   // SVG export: the modules are already exact vector polygons, so this is
   // just plain vector shapes -- no embedded raster image, no DPI ceiling.
   function svgFromVectorPiece(name, piece) {
-    const { widthCm, heightCm, outline, foldLines, modulePolys } = piece;
+    const { widthCm, heightCm, outline, foldLines, modulePolys, bgRgb, darkRgb } = piece;
     const totalHeightCm = heightCm + CAPTION_HEIGHT_CM;
     const outlinePts = outline.map(([x, y]) => `${x.toFixed(3)},${y.toFixed(3)}`).join(' ');
     const moduleD = modulePolys.map((poly) =>
@@ -921,8 +946,8 @@
     const fs1 = 0.42, fs2 = 0.36;
     return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${widthCm}cm" height="${totalHeightCm}cm" viewBox="${-widthCm / 2} 0 ${widthCm} ${totalHeightCm}">
-  <polygon points="${outlinePts}" fill="${rgbToHex(BG_RGB)}"/>
-  <path d="${moduleD}" fill="${rgbToHex(DARK_RGB)}"/>
+  <polygon points="${outlinePts}" fill="${rgbToHex(bgRgb)}"/>
+  <path d="${moduleD}" fill="${rgbToHex(darkRgb)}"/>
   <polygon points="${outlinePts}" fill="none" stroke="#000000" stroke-width="0.06"/>
   ${folds}
   <text x="${(-widthCm / 2 + 0.3).toFixed(3)}" y="${(heightCm + CAPTION_HEIGHT_CM * 0.55).toFixed(3)}" font-size="${fs1}" font-family="sans-serif" fill="#333333">${escapeXml(name)}</text>
@@ -1423,8 +1448,8 @@
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
   <resources>
     <m:colorgroup id="1">
-      <m:color color="${rgbToHex(BG_RGB)}"/>
-      <m:color color="${rgbToHex(DARK_RGB)}"/>
+      <m:color color="${rgbToHex(prismRgb(state))}"/>
+      <m:color color="${rgbToHex(qrModuleRgb(state))}"/>
     </m:colorgroup>
     ${prismObj}
     ${qrObj}
@@ -1566,6 +1591,15 @@
 
     document.getElementById('qrText').addEventListener('input', (e) => {
       state.qrText = e.target.value;
+      scheduleRebuild();
+    });
+
+    document.getElementById('prismColor').addEventListener('input', (e) => {
+      state.prismColor = e.target.value;
+      scheduleRebuild();
+    });
+    document.getElementById('qrColor').addEventListener('input', (e) => {
+      state.qrColor = e.target.value;
       scheduleRebuild();
     });
 

@@ -29,23 +29,23 @@
         <div class="slider-field">
           <div class="slider-row">
             <span>Base length L</span>
-            <span class="num-wrap"><input type="number" id="L-num" class="dim-input" min="10" max="200" step="0.5" value="25"> cm</span>
+            <span class="num-wrap"><input type="number" id="L-num" class="dim-input" min="5" max="200" step="0.5" value="16"> cm</span>
           </div>
-          <input type="range" id="L" min="10" max="200" step="0.5" value="25">
+          <input type="range" id="L" min="5" max="200" step="0.5" value="16">
         </div>
         <div class="slider-field">
           <div class="slider-row">
             <span>Base width W</span>
-            <span class="num-wrap"><input type="number" id="W-num" class="dim-input" min="10" max="200" step="0.5" value="25"> cm</span>
+            <span class="num-wrap"><input type="number" id="W-num" class="dim-input" min="5" max="200" step="0.5" value="21"> cm</span>
           </div>
-          <input type="range" id="W" min="10" max="200" step="0.5" value="25">
+          <input type="range" id="W" min="5" max="200" step="0.5" value="21">
         </div>
         <div class="slider-field">
           <div class="slider-row">
             <span>Ridge length R</span>
-            <span class="num-wrap"><input type="number" id="R-num" class="dim-input" min="0" max="60" step="0.5" value="15"> cm</span>
+            <span class="num-wrap"><input type="number" id="R-num" class="dim-input" min="0" max="60" step="0.5" value="8"> cm</span>
           </div>
-          <input type="range" id="R" min="0" max="60" step="0.5" value="15">
+          <input type="range" id="R" min="0" max="60" step="0.5" value="8">
         </div>
         <div class="slider-field">
           <div class="slider-row">
@@ -57,14 +57,28 @@
         <div class="slider-field">
           <div class="slider-row">
             <span>Scan distance (above ridge)</span>
-            <span class="num-wrap"><input type="number" id="viewDist-num" class="dim-input" min="0" max="150" step="0.5" value="40"> cm</span>
+            <span class="num-wrap"><input type="number" id="viewDist-num" class="dim-input" min="0" max="150" step="0.5" value="10"> cm</span>
           </div>
-          <input type="range" id="viewDist" min="0" max="150" step="0.5" value="40">
+          <input type="range" id="viewDist" min="0" max="150" step="0.5" value="10">
         </div>
       </div>
 
       <p class="readout" id="qrSizeReadout"></p>
       <p class="warn" id="warnReadout" hidden></p>
+
+      <div class="field">
+        <span>Colors</span>
+        <div class="color-row">
+          <label class="color-field">
+            <input type="color" id="prismColor" value="#112777">
+            <span>Prism</span>
+          </label>
+          <label class="color-field">
+            <input type="color" id="qrColor" value="#ffffff">
+            <span>QR code</span>
+          </label>
+        </div>
+      </div>
 
       <div class="field">
         <span>File format</span>

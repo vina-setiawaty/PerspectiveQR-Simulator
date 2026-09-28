@@ -82,6 +82,17 @@ input[type=text] {
 .dim-input::-webkit-inner-spin-button,
 .dim-input::-webkit-outer-spin-button { opacity: 1; }
 .slider-field input[type=range] { width: 100%; }
+.color-row { display: flex; gap: 16px; }
+.color-field { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+.color-field input[type=color] {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
 .readout {
   font-size: 0.82rem;
   color: var(--ink);
